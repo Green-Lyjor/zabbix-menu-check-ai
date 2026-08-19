@@ -2,7 +2,7 @@
 """Consulta uma LLM pelo OpenRouter para analisar um problema do Zabbix.
 
 Entrada: um objeto JSON como primeiro argumento ou pela entrada padrão.
-Exemplo: {"api_key": "...", "model": "openai/gpt-4o-mini", "alert_subject": "..."}
+Exemplo: {"model": "openai/gpt-4o-mini", "alert_subject": "...", "trigger_description": "..."}
 """
 
 import json
@@ -34,16 +34,28 @@ def load_dotenv() -> None:
                 os.environ[name] = value
 
 
-def read_payload() -> dict:
-    """Lê os parâmetros do Zabbix como JSON."""
-    raw_payload = sys.argv[1] if len(sys.argv) > 1 else sys.stdin.read()
+def read_payload() -> tuple[dict, bool]:
+    """Lê os parâmetros do Zabbix como JSON e identifica o modo debug."""
+    debug = len(sys.argv) > 1 and sys.argv[1] == "--debug"
+    payload_index = 2 if debug else 1
+    raw_payload = sys.argv[payload_index] if len(sys.argv) > payload_index else sys.stdin.read()
     if not raw_payload.strip():
         raise ValueError("Nenhum JSON foi recebido do Zabbix.")
 
     payload = json.loads(raw_payload)
     if not isinstance(payload, dict):
         raise ValueError("A entrada deve ser um objeto JSON.")
-    return payload
+    return payload, debug
+
+
+def print_debug_payload(payload: dict) -> None:
+    """Exibe o payload recebido sem revelar credenciais."""
+    safe_payload = dict(payload)
+    for key in ("api_key", "openrouter_api_key"):
+        if key in safe_payload:
+            safe_payload[key] = "[OCULTA]"
+    print("[DEBUG] Payload submetido:")
+    print(json.dumps(safe_payload, ensure_ascii=False, indent=2))
 
 
 def build_prompt(payload: dict) -> str:
@@ -51,6 +63,9 @@ def build_prompt(payload: dict) -> str:
     alert_subject = str(payload.get("alert_subject", "")).strip()
     if not alert_subject:
         raise ValueError('O parâmetro "alert_subject" é obrigatório.')
+    trigger_description = str(payload.get("trigger_description", "")).strip()
+    if not trigger_description:
+        raise ValueError('O parâmetro "trigger_description" é obrigatório.')
 
     context_fields = (
         ("Host", "host"),
@@ -59,7 +74,10 @@ def build_prompt(payload: dict) -> str:
         ("Detalhes do alerta", "alert_body"),
         ("Dados operacionais", "operational_data"),
     )
-    context = [f"Assunto: {alert_subject}"]
+    context = [
+        f"Assunto do alerta: {alert_subject}",
+        f"Descrição da trigger: {trigger_description}",
+    ]
     context.extend(
         f"{label}: {payload[key]}"
         for label, key in context_fields
@@ -136,7 +154,9 @@ def request_openrouter(api_key: str, prompt: str, model: str, timeout: int) -> s
 def main() -> int:
     try:
         load_dotenv()
-        payload = read_payload()
+        payload, debug = read_payload()
+        if debug:
+            print_debug_payload(payload)
         api_key = str(
             payload.get(
                 "api_key",
